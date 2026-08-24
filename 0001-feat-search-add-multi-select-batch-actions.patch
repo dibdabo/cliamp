@@ -1,0 +1,396 @@
+From 540d7f2b142b9ebd8acd8419818d6377dc6a5266 Mon Sep 17 00:00:00 2001
+From: jd <jd@archbook>
+Date: Tue, 25 Aug 2026 00:22:09 +0100
+Subject: [PATCH] feat(search): add multi-select batch actions
+
+---
+ docs/keybindings.md                  |   5 +-
+ site/index.html                      |   2 +-
+ ui/model/command_registry.go         |   3 +
+ ui/model/inline_overlays.go          |  12 ++-
+ ui/model/keys_spotify_search.go      |  43 +++++++++-
+ ui/model/keys_spotify_search_test.go | 120 +++++++++++++++++++++++++++
+ ui/model/playback.go                 |  49 ++++++++---
+ ui/model/state.go                    |   1 +
+ ui/model/update.go                   |   1 +
+ 9 files changed, 216 insertions(+), 20 deletions(-)
+ create mode 100644 ui/model/keys_spotify_search_test.go
+
+diff --git a/docs/keybindings.md b/docs/keybindings.md
+index b1fc9fd..2c01246 100644
+--- a/docs/keybindings.md
++++ b/docs/keybindings.md
+@@ -187,9 +187,10 @@ When `Ctrl+F` opens provider search or YouTube/SoundCloud net search and you're
+ |---|---|
+ | `↑` `↓` / `j` `k` / `Ctrl+N` `Ctrl+P` | Move cursor (single item) |
+ | `Ctrl+U` `Ctrl+D` | Scroll results by page |
++| `Space` | Select or deselect a track for a batch action, then move to the next result |
+ | `Enter` | Play the selected track now |
+-| `a` | Append the selected track to the playlist |
+-| `q` | Queue the selected track to play next |
++| `a` | Append all marked tracks to the playlist in result order (or the current track if none are marked) |
++| `q` | Queue all marked tracks to play next in result order (or the current track if none are marked) |
+ | `p` | (Spotify only) Save the selected track to a Spotify playlist |
+ | `Esc` `Backspace` | Back to the search input |
+ 
+diff --git a/site/index.html b/site/index.html
+index ae5724c..efa9d97 100644
+--- a/site/index.html
++++ b/site/index.html
+@@ -715,7 +715,7 @@ footer{border-top:1px solid var(--line);background:var(--ink-2);padding:46px 0 5
+       Stream from everywhere. Every provider runs through the same <em>playlist, EQ, visualizer, and lyrics pipeline</em> — your config follows you across services. Run <code>cliamp setup</code> for an interactive wizard that walks you through Navidrome, Plex, Jellyfin, Emby, Audiobookshelf, Spotify, Qobuz, NetEase, and YouTube Music.
+     </p>
+     <div class="sources-grid reveal">
+-      <div class="source" style="--src-color:#1db954"><div class="source-badge">OAuth · cached</div><div class="source-name">Spotify</div><div class="source-desc">Stream your Premium library. Bring your own developer <code>client_id</code> for a private Web API quota; playback is authorized separately. Search &amp; add tracks with <kbd>F</kbd>. Currently unavailable on Windows builds.</div></div>
++      <div class="source" style="--src-color:#1db954"><div class="source-badge">OAuth · cached</div><div class="source-name">Spotify</div><div class="source-desc">Stream your Premium library. Bring your own developer <code>client_id</code> for a private Web API quota; playback is authorized separately. Search with <kbd>Ctrl+F</kbd>, mark multiple results with <kbd>Space</kbd>, then append or queue them together. Currently unavailable on Windows builds.</div></div>
+       <div class="source" style="--src-color:#c3c9d4"><div class="source-badge">OAuth · lossless</div><div class="source-name">Qobuz</div><div class="source-desc">Opt-in: set <code>[qobuz] enabled = true</code>. Stream lossless FLAC up to 24-bit/192kHz from your subscription. Browse favorites &amp; playlists, search with <kbd>Ctrl+F</kbd>. Sign in once via OAuth in your browser.</div></div>
+       <div class="source" style="--src-color:#ff0000"><div class="source-badge">yt-dlp</div><div class="source-name">YouTube</div><div class="source-desc">Search videos with <kbd>Ctrl+F</kbd>, then play, append, or queue from a results list.</div></div>
+       <div class="source" style="--src-color:#ff4444"><div class="source-badge">OAuth · cached</div><div class="source-name">YT Music</div><div class="source-desc">Browse your playlists with auto music/non-music classification. Set <code>cookies_from</code> to play through your browser session and avoid YouTube bot blocks (keep <code>yt-dlp</code> current).</div></div>
+diff --git a/ui/model/command_registry.go b/ui/model/command_registry.go
+index 8bc9743..1cb88ec 100644
+--- a/ui/model/command_registry.go
++++ b/ui/model/command_registry.go
+@@ -147,6 +147,9 @@ var commandRegistry = []commandSpec{
+ 	{Mode: commandModeKeymap | commandModeFileBrowser | commandModeNavBrowser | commandModePlaylistManager | commandModePlaylistPicker | commandModeQueue | commandModeDevicePicker, Keys: []string{"esc"}, KeyLabel: "Esc", Label: "Back", ContextHelp: true, Cancel: true},
+ 	{Mode: commandModeKeymapSearch | commandModeFileBrowserSearch | commandModeNavSearch | commandModePlaylistManagerInput | commandModePlaylistPickerInput | commandModeSearch | commandModeNetSearch | commandModeSpotSearch | commandModeJump | commandModeURL | commandModeProviderSearch, Keys: []string{"esc"}, KeyLabel: "Esc", Label: "Cancel", ContextHelp: true, Cancel: true},
+ 	{Mode: commandModeKeymapSearch | commandModeFileBrowserSearch | commandModeNavSearch | commandModePlaylistManagerInput | commandModePlaylistPickerInput | commandModeSearch | commandModeNetSearch | commandModeSpotSearch | commandModeJump | commandModeURL | commandModeProviderSearch, Keys: []string{"enter"}, KeyLabel: "Enter", Label: "Confirm", ContextHelp: true, Primary: true},
++	{Mode: commandModeSpotSearch, Keys: []string{"space"}, KeyLabel: "Space", Label: "Select", ContextHelp: true, Enabled: func(m Model) bool { return m.spotSearch.screen == spotSearchResults }},
++	{Mode: commandModeSpotSearch, Keys: []string{"a"}, KeyLabel: "a", Label: "Append selected", ContextHelp: true, Enabled: func(m Model) bool { return m.spotSearch.screen == spotSearchResults }},
++	{Mode: commandModeSpotSearch, Keys: []string{"q"}, KeyLabel: "q", Label: "Queue selected", ContextHelp: true, Enabled: func(m Model) bool { return m.spotSearch.screen == spotSearchResults }},
+ 	{Mode: commandModeNavBrowser | commandModePlaylistManager | commandModePlaylistPicker | commandModeQueue | commandModeDevicePicker | commandModeProviderSearch, Keys: []string{"up", "down", "k", "j"}, KeyLabel: "Up Down", Label: "Navigate", ContextHelp: true},
+ 	{Mode: commandModeFileBrowser | commandModeNavBrowser | commandModePlaylistManager | commandModePlaylistPicker | commandModeDevicePicker, Keys: []string{"enter"}, KeyLabel: "Enter", Label: "Select", ContextHelp: true, Primary: true},
+ 	{Mode: commandModeKeymap, Keys: []string{"/"}, KeyLabel: "/", Label: "Filter", ContextHelp: true, Primary: true},
+diff --git a/ui/model/inline_overlays.go b/ui/model/inline_overlays.go
+index c7c796a..8527249 100644
+--- a/ui/model/inline_overlays.go
++++ b/ui/model/inline_overlays.go
+@@ -464,7 +464,11 @@ func (m Model) renderNetSearchBody() string {
+ func (m Model) spotSearchHeaderLine() string {
+ 	switch m.spotSearch.screen {
+ 	case spotSearchResults:
+-		return sepHeaderN("Results", m.spotSearch.cursor+1, len(m.spotSearch.results))
++		label := "Results"
++		if count := len(m.spotSearch.selected); count > 0 {
++			label = fmt.Sprintf("Results · %d selected", count)
++		}
++		return sepHeaderN(label, m.spotSearch.cursor+1, len(m.spotSearch.results))
+ 	case spotSearchPlaylist:
+ 		return sepHeaderN("Add to Playlist", m.spotSearch.cursor+1, len(m.spotSearch.playlists)+1)
+ 	case spotSearchNewName:
+@@ -497,7 +501,11 @@ func (m Model) renderSpotSearchBody() string {
+ 		} else {
+ 			items := make([]string, len(m.spotSearch.results))
+ 			for i, t := range m.spotSearch.results {
+-				items[i] = truncate(fmt.Sprintf("%s - %s", t.Artist, t.Title), ui.PanelWidth-8)
++				marker := "[ ]"
++				if m.spotSearch.selected[i] {
++					marker = "[x]"
++				}
++				items[i] = truncate(fmt.Sprintf("%s %s - %s", marker, t.Artist, t.Title), ui.PanelWidth-8)
+ 			}
+ 			body = windowList(items, m.spotSearch.cursor, m.spotSearch.scroll, budget)
+ 		}
+diff --git a/ui/model/keys_spotify_search.go b/ui/model/keys_spotify_search.go
+index dff7404..092aefe 100644
+--- a/ui/model/keys_spotify_search.go
++++ b/ui/model/keys_spotify_search.go
+@@ -6,6 +6,7 @@ import (
+ 
+ 	tea "charm.land/bubbletea/v2"
+ 
++	"github.com/bjarneo/cliamp/playlist"
+ 	"github.com/bjarneo/cliamp/provider"
+ )
+ 
+@@ -61,6 +62,25 @@ func (m *Model) spotSearchResultsMaybeAdjustScroll(visible int) {
+ 	clampScroll(&m.spotSearch.cursor, &m.spotSearch.scroll, len(m.spotSearch.results), visible)
+ }
+ 
++// spotSearchActionTracks returns marked results in display order. With no
++// marks, actions retain their original single-track behavior at the cursor.
++func (m *Model) spotSearchActionTracks() []playlist.Track {
++	if len(m.spotSearch.selected) == 0 {
++		if m.spotSearch.cursor < 0 || m.spotSearch.cursor >= len(m.spotSearch.results) {
++			return nil
++		}
++		return []playlist.Track{m.spotSearch.results[m.spotSearch.cursor]}
++	}
++
++	tracks := make([]playlist.Track, 0, len(m.spotSearch.selected))
++	for i, track := range m.spotSearch.results {
++		if m.spotSearch.selected[i] {
++			tracks = append(tracks, track)
++		}
++	}
++	return tracks
++}
++
+ // handleSpotSearchResultsKey handles navigation through search results.
+ func (m *Model) handleSpotSearchResultsKey(msg tea.KeyPressMsg) tea.Cmd {
+ 	count := len(m.spotSearch.results)
+@@ -83,6 +103,21 @@ func (m *Model) handleSpotSearchResultsKey(msg tea.KeyPressMsg) tea.Cmd {
+ 			m.spotSearch.cursor = 0
+ 		}
+ 		m.spotSearchResultsMaybeAdjustScroll(m.spotSearchResultsVisible())
++	case "space":
++		if count > 0 && !m.spotSearch.loading {
++			if m.spotSearch.selected == nil {
++				m.spotSearch.selected = make(map[int]bool)
++			}
++			if m.spotSearch.selected[m.spotSearch.cursor] {
++				delete(m.spotSearch.selected, m.spotSearch.cursor)
++			} else {
++				m.spotSearch.selected[m.spotSearch.cursor] = true
++			}
++			if m.spotSearch.cursor < count-1 {
++				m.spotSearch.cursor++
++				m.spotSearchResultsMaybeAdjustScroll(m.spotSearchResultsVisible())
++			}
++		}
+ 	case "enter":
+ 		if count > 0 && !m.spotSearch.loading {
+ 			track := m.spotSearch.results[m.spotSearch.cursor]
+@@ -91,15 +126,15 @@ func (m *Model) handleSpotSearchResultsKey(msg tea.KeyPressMsg) tea.Cmd {
+ 		}
+ 	case "a":
+ 		if count > 0 && !m.spotSearch.loading {
+-			track := m.spotSearch.results[m.spotSearch.cursor]
++			tracks := m.spotSearchActionTracks()
+ 			m.closeSpotSearch()
+-			return m.appendTrack(track)
++			return m.appendTracks(tracks)
+ 		}
+ 	case "q":
+ 		if count > 0 && !m.spotSearch.loading {
+-			track := m.spotSearch.results[m.spotSearch.cursor]
++			tracks := m.spotSearchActionTracks()
+ 			m.closeSpotSearch()
+-			return m.queueTrackNext(track)
++			return m.queueTracksNext(tracks)
+ 		}
+ 	case "p":
+ 		if count > 0 && !m.spotSearch.loading {
+diff --git a/ui/model/keys_spotify_search_test.go b/ui/model/keys_spotify_search_test.go
+new file mode 100644
+index 0000000..e393553
+--- /dev/null
++++ b/ui/model/keys_spotify_search_test.go
+@@ -0,0 +1,120 @@
++package model
++
++import (
++	"strings"
++	"testing"
++
++	tea "charm.land/bubbletea/v2"
++
++	"github.com/bjarneo/cliamp/playlist"
++)
++
++func spotifySearchTestTracks() []playlist.Track {
++	return []playlist.Track{
++		{Title: "First", Artist: "Artist", Path: "spotify:track:first"},
++		{Title: "Second", Artist: "Artist", Path: "spotify:track:second"},
++		{Title: "Third", Artist: "Artist", Path: "spotify:track:third"},
++	}
++}
++
++func TestSpotSearchSpaceTogglesSelectionAndAdvances(t *testing.T) {
++	m := Model{
++		plVisible: 10,
++		spotSearch: spotSearchState{
++			screen:  spotSearchResults,
++			results: spotifySearchTestTracks(),
++			cursor:  1,
++		},
++	}
++
++	m.handleSpotSearchResultsKey(tea.KeyPressMsg{Code: tea.KeySpace})
++	if !m.spotSearch.selected[1] {
++		t.Fatal("result 1 was not selected")
++	}
++	if m.spotSearch.cursor != 2 {
++		t.Fatalf("cursor = %d, want 2 after selecting", m.spotSearch.cursor)
++	}
++
++	m.spotSearch.cursor = 1
++	m.handleSpotSearchResultsKey(tea.KeyPressMsg{Code: tea.KeySpace})
++	if m.spotSearch.selected[1] {
++		t.Fatal("result 1 remained selected after toggling it off")
++	}
++}
++
++func TestSpotSearchBatchAppendUsesResultOrder(t *testing.T) {
++	p := playlist.New()
++	p.Add(playlist.Track{Title: "Existing", Path: "existing"})
++	m := Model{
++		player:   &fakeEngine{},
++		playlist: p,
++		spotSearch: spotSearchState{
++			visible:  true,
++			screen:   spotSearchResults,
++			results:  spotifySearchTestTracks(),
++			selected: map[int]bool{0: true, 2: true},
++		},
++	}
++
++	if cmd := m.handleSpotSearchResultsKey(tea.KeyPressMsg{Text: "a"}); cmd != nil {
++		t.Fatal("append command was non-nil while playback was active")
++	}
++	got := m.playlist.Tracks()
++	if len(got) != 3 || got[0].Title != "Existing" || got[1].Title != "First" || got[2].Title != "Third" {
++		t.Fatalf("playlist titles = %v, want [Existing First Third]", trackTitles(got))
++	}
++	if m.spotSearch.visible {
++		t.Fatal("search remained open after batch append")
++	}
++}
++
++func TestSpotSearchBatchQueueUsesResultOrder(t *testing.T) {
++	p := playlist.New()
++	p.Add(playlist.Track{Title: "Playing", Path: "playing"})
++	m := Model{
++		player:   &fakeEngine{},
++		playlist: p,
++		spotSearch: spotSearchState{
++			visible:  true,
++			screen:   spotSearchResults,
++			results:  spotifySearchTestTracks(),
++			selected: map[int]bool{0: true, 2: true},
++		},
++	}
++
++	if cmd := m.handleSpotSearchResultsKey(tea.KeyPressMsg{Text: "q"}); cmd != nil {
++		t.Fatal("queue command was non-nil while playback was active")
++	}
++	got := m.playlist.QueueTracks()
++	if len(got) != 2 || got[0].Title != "First" || got[1].Title != "Third" {
++		t.Fatalf("queued titles = %v, want [First Third]", trackTitles(got))
++	}
++}
++
++func TestSpotSearchResultsRenderSelectionAndHelp(t *testing.T) {
++	m := Model{
++		plVisible: 4,
++		spotSearch: spotSearchState{
++			screen:   spotSearchResults,
++			results:  spotifySearchTestTracks(),
++			selected: map[int]bool{1: true},
++		},
++	}
++
++	if body := m.renderSpotSearchBody(); !strings.Contains(body, "[x] Artist - Second") {
++		t.Fatalf("search body does not mark selected track: %q", body)
++	}
++	for _, want := range []string{"Space", "Select"} {
++		if help := m.spotSearchResultsHelpLine(); !strings.Contains(help, want) {
++			t.Fatalf("search help %q does not contain %q", help, want)
++		}
++	}
++}
++
++func trackTitles(tracks []playlist.Track) []string {
++	titles := make([]string, len(tracks))
++	for i, track := range tracks {
++		titles[i] = track.Title
++	}
++	return titles
++}
+diff --git a/ui/model/playback.go b/ui/model/playback.go
+index 1285962..3026c93 100644
+--- a/ui/model/playback.go
++++ b/ui/model/playback.go
+@@ -116,15 +116,28 @@ func (m *Model) playTrackImmediate(track playlist.Track) tea.Cmd {
+ 
+ // appendTrack appends a track to the playlist; auto-plays if nothing is playing.
+ func (m *Model) appendTrack(track playlist.Track) tea.Cmd {
++	return m.appendTracks([]playlist.Track{track})
++}
++
++// appendTracks appends tracks in order; auto-plays the first new track if
++// nothing is playing.
++func (m *Model) appendTracks(tracks []playlist.Track) tea.Cmd {
++	if len(tracks) == 0 {
++		return nil
++	}
+ 	wasEmpty := m.playlist.Len() == 0
+-	m.playlist.Add(track)
++	start := m.playlist.Len()
++	m.playlist.Add(tracks...)
+ 	m.loadedPlaylist = ""
+-	m.addToHeaderState([]playlist.Track{track})
+-	idx := m.playlist.Len() - 1
+-	m.status.Showf(statusTTLMedium, "Added: %s", track.DisplayName())
++	m.addToHeaderState(tracks)
++	if len(tracks) == 1 {
++		m.status.Showf(statusTTLMedium, "Added: %s", tracks[0].DisplayName())
++	} else {
++		m.status.Showf(statusTTLMedium, "Added %d tracks", len(tracks))
++	}
+ 	if wasEmpty || !m.player.IsPlaying() {
+-		m.playlist.SetIndex(idx)
+-		m.plCursor = idx
++		m.playlist.SetIndex(start)
++		m.plCursor = start
+ 		m.adjustScroll()
+ 		cmd := m.playCurrentTrack()
+ 		m.notifyPlayback()
+@@ -167,12 +180,26 @@ func (m *Model) cancelSpotRequest() {
+ 
+ // queueTrackNext adds a track to the playlist and queues it to play next.
+ func (m *Model) queueTrackNext(track playlist.Track) tea.Cmd {
+-	m.playlist.Add(track)
++	return m.queueTracksNext([]playlist.Track{track})
++}
++
++// queueTracksNext adds tracks to the playlist and queues them in order.
++func (m *Model) queueTracksNext(tracks []playlist.Track) tea.Cmd {
++	if len(tracks) == 0 {
++		return nil
++	}
++	start := m.playlist.Len()
++	m.playlist.Add(tracks...)
+ 	m.loadedPlaylist = ""
+-	m.addToHeaderState([]playlist.Track{track})
+-	idx := m.playlist.Len() - 1
+-	m.playlist.Queue(idx)
+-	m.status.Showf(statusTTLMedium, "Queued: %s", track.DisplayName())
++	m.addToHeaderState(tracks)
++	for i := range tracks {
++		m.playlist.Queue(start + i)
++	}
++	if len(tracks) == 1 {
++		m.status.Showf(statusTTLMedium, "Queued: %s", tracks[0].DisplayName())
++	} else {
++		m.status.Showf(statusTTLMedium, "Queued %d tracks", len(tracks))
++	}
+ 	if !m.player.IsPlaying() {
+ 		cmd := m.nextTrack()
+ 		m.notifyPlayback()
+diff --git a/ui/model/state.go b/ui/model/state.go
+index af53026..b8dd4af 100644
+--- a/ui/model/state.go
++++ b/ui/model/state.go
+@@ -272,6 +272,7 @@ type spotSearchState struct {
+ 	screen    spotSearchScreenType
+ 	query     string
+ 	results   []playlist.Track
++	selected  map[int]bool // result indexes marked for a batch append/queue action
+ 	cursor    int
+ 	scroll    int
+ 	loading   bool
+diff --git a/ui/model/update.go b/ui/model/update.go
+index 2ce8518..4325e8b 100644
+--- a/ui/model/update.go
++++ b/ui/model/update.go
+@@ -725,6 +725,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 			return m, nil
+ 		}
+ 		m.spotSearch.results = msg.tracks
++		m.spotSearch.selected = nil
+ 		m.spotSearch.cursor = 0
+ 		m.spotSearch.screen = spotSearchResults
+ 		m.applyHeightMode()
+-- 
+2.55.0
+
