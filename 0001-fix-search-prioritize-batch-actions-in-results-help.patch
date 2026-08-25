@@ -1,0 +1,73 @@
+From 7b31db91598de91f486d781e536103387b2ac05c Mon Sep 17 00:00:00 2001
+From: jd <jd@archbook>
+Date: Wed, 26 Aug 2026 00:06:36 +0100
+Subject: [PATCH] fix(search): prioritize batch actions in results help
+
+---
+ ui/model/keys_spotify_search_test.go | 17 ++++++++++++++++-
+ ui/model/overlays.go                 | 11 ++++++++++-
+ 2 files changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/ui/model/keys_spotify_search_test.go b/ui/model/keys_spotify_search_test.go
+index e393553..5deb2c7 100644
+--- a/ui/model/keys_spotify_search_test.go
++++ b/ui/model/keys_spotify_search_test.go
+@@ -7,6 +7,7 @@ import (
+ 	tea "charm.land/bubbletea/v2"
+ 
+ 	"github.com/bjarneo/cliamp/playlist"
++	"github.com/bjarneo/cliamp/ui"
+ )
+ 
+ func spotifySearchTestTracks() []playlist.Track {
+@@ -104,13 +105,27 @@ func TestSpotSearchResultsRenderSelectionAndHelp(t *testing.T) {
+ 	if body := m.renderSpotSearchBody(); !strings.Contains(body, "[x] Artist - Second") {
+ 		t.Fatalf("search body does not mark selected track: %q", body)
+ 	}
+-	for _, want := range []string{"Space", "Select"} {
++	for _, want := range []string{"Space", "Mark", "a", "Append", "q", "Queue"} {
+ 		if help := m.spotSearchResultsHelpLine(); !strings.Contains(help, want) {
+ 			t.Fatalf("search help %q does not contain %q", help, want)
+ 		}
+ 	}
+ }
+ 
++func TestSpotSearchResultsHelpPrioritizesBatchActionsAtNarrowWidth(t *testing.T) {
++	oldPanelWidth := ui.PanelWidth
++	ui.PanelWidth = 40
++	t.Cleanup(func() { ui.PanelWidth = oldPanelWidth })
++
++	m := Model{}
++	help := m.spotSearchResultsHelpLine()
++	for _, want := range []string{"Space", "a", "q"} {
++		if !strings.Contains(help, want) {
++			t.Fatalf("narrow search help %q does not contain %q", help, want)
++		}
++	}
++}
++
+ func trackTitles(tracks []playlist.Track) []string {
+ 	titles := make([]string, len(tracks))
+ 	for i, track := range tracks {
+diff --git a/ui/model/overlays.go b/ui/model/overlays.go
+index 4063472..5643ff7 100644
+--- a/ui/model/overlays.go
++++ b/ui/model/overlays.go
+@@ -294,7 +294,16 @@ func (m *Model) netSearchResultsVisible() int {
+ }
+ 
+ func (m *Model) spotSearchResultsHelpLine() string {
+-	return m.commandHelp(commandModeSpotSearch)
++	// Batch actions are the purpose of this results screen, so keep them ahead
++	// of generic cancel/confirm/help hints when the terminal is narrow.
++	return renderCommandHelp([]commandSpec{
++		{KeyLabel: "Space", Label: "Mark"},
++		{KeyLabel: "a", Label: "Append"},
++		{KeyLabel: "q", Label: "Queue"},
++		{KeyLabel: "Esc", Label: "Cancel", Cancel: true},
++		{KeyLabel: "Enter", Label: "Play", Primary: true},
++		{KeyLabel: "Ctrl+K", Label: "Help", Help: true},
++	}, m.helpWidth())
+ }
+ 
+ func (m *Model) spotSearchResultsVisible() int {
