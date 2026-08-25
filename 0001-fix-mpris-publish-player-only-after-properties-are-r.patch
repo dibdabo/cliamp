@@ -1,0 +1,53 @@
+From fa20512854aec99d14db7abd4324cc5a693de858 Mon Sep 17 00:00:00 2001
+From: jd <jd@archbook>
+Date: Tue, 25 Aug 2026 23:52:06 +0100
+Subject: [PATCH] fix(mpris): publish player only after properties are ready
+
+---
+ mediactl/service_linux.go | 26 +++++++++++++++-----------
+ 1 file changed, 15 insertions(+), 11 deletions(-)
+
+diff --git a/mediactl/service_linux.go b/mediactl/service_linux.go
+index ddae985..5fcf097 100644
+--- a/mediactl/service_linux.go
++++ b/mediactl/service_linux.go
+@@ -135,17 +135,6 @@ func New(send func(tea.Msg)) (*Service, error) {
+ 		return nil, fmt.Errorf("mpris: session bus: %w", err)
+ 	}
+ 
+-	reply, err := conn.RequestName("org.mpris.MediaPlayer2.cliamp",
+-		dbus.NameFlagDoNotQueue)
+-	if err != nil {
+-		conn.Close()
+-		return nil, fmt.Errorf("mpris: request name: %w", err)
+-	}
+-	if reply != dbus.RequestNameReplyPrimaryOwner {
+-		conn.Close()
+-		return nil, fmt.Errorf("mpris: name already taken")
+-	}
+-
+ 	svc := &Service{conn: conn, send: send, trackSeq: 1, trackID: trackPath(1)}
+ 	path := dbus.ObjectPath("/org/mpris/MediaPlayer2")
+ 
+@@ -214,6 +203,21 @@ func New(send func(tea.Msg)) (*Service, error) {
+ 	}
+ 	svc.props = props
+ 
++	// Claim the well-known name only after the object is fully exported.
++	// MPRIS clients commonly query Properties as soon as NameOwnerChanged is
++	// emitted; owning the name earlier creates a race where that first GetAll
++	// sees an incomplete object and some clients never retry.
++	reply, err := conn.RequestName("org.mpris.MediaPlayer2.cliamp",
++		dbus.NameFlagDoNotQueue)
++	if err != nil {
++		conn.Close()
++		return nil, fmt.Errorf("mpris: request name: %w", err)
++	}
++	if reply != dbus.RequestNameReplyPrimaryOwner {
++		conn.Close()
++		return nil, fmt.Errorf("mpris: name already taken")
++	}
++
+ 	return svc, nil
+ }
+ 
