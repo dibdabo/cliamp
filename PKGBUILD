@@ -1,11 +1,12 @@
 # Maintainer: bjarneo <https://github.com/bjarneo>
 pkgname=cliamp
 pkgver=1.63.2.r40.gdc5eaee
-pkgrel=4
+pkgrel=5
 _commit=dc5eaee63d467c60845a7b8fe244f48ef7cdca53
 _patch=0001-feat-search-add-multi-select-batch-actions.patch
 _mpris_patch=0001-fix-mpris-publish-player-only-after-properties-are-r.patch
 _help_patch=0001-fix-search-prioritize-batch-actions-in-results-help.patch
+_album_patch=0001-feat-spotify-add-album-search-results.patch
 pkgdesc='A retro terminal music player inspired by Winamp 2.x'
 arch=('x86_64' 'aarch64')
 url='https://github.com/bjarneo/cliamp'
@@ -17,24 +18,27 @@ makedepends=('go')
 source=("${pkgname}-${_commit}.tar.gz::https://github.com/bjarneo/cliamp/archive/${_commit}.tar.gz"
         "${_patch}"
         "${_mpris_patch}"
-        "${_help_patch}")
+        "${_help_patch}"
+        "${_album_patch}")
 sha256sums=('c409cc009d69d54bc72fdbeded9f40afbc09839e23638e6fb275a4abcd053341'
             'fd438ade533f15fe7e6028d2708d0ea371552c0c36a61e6ddc6b4d2c55044484'
             'ecf4feebf060182745cc49cfcb66dff13d54ac67391e4523ca85154a3ee1abb2'
-            '01ee9be7eb76ba81b10ee0285e02737b385d82161d6a7fe665de98073ed4d868')
+            '01ee9be7eb76ba81b10ee0285e02737b385d82161d6a7fe665de98073ed4d868'
+            '3f1c449aaabd96f21b47c76b317ef18240be68ac6e2dc9dc1e64ee9d3df852e9')
 
 prepare() {
     cd "${pkgname}-${_commit}"
     patch -Np1 -i "${srcdir}/${_patch}"
     patch -Np1 -i "${srcdir}/${_mpris_patch}"
     patch -Np1 -i "${srcdir}/${_help_patch}"
+    patch -Np1 -i "${srcdir}/${_album_patch}"
 }
 
 build() {
     cd "${pkgname}-${_commit}"
     export CGO_ENABLED=1
     go build -trimpath -buildmode=pie \
-        -ldflags="-s -w -X main.version=v${pkgver}.multiselect1.mpris1.help1 -linkmode=external" \
+        -ldflags="-s -w -X main.version=v${pkgver}.multiselect1.mpris1.help1.albums1 -linkmode=external" \
         -o cliamp .
 }
 

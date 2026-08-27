@@ -1,0 +1,973 @@
+From 993c9dbb5ea35f062f338328e1bcab5371bb29fe Mon Sep 17 00:00:00 2001
+From: jd <jd@archbook>
+Date: Thu, 27 Aug 2026 23:15:14 +0100
+Subject: [PATCH] feat(spotify): add album search results
+
+---
+ docs/keybindings.md                     |   8 +-
+ external/spotify/provider.go            | 143 +++++++++++++++++++++---
+ external/spotify/provider_shared.go     |  29 +++++
+ external/spotify/search_devmode_test.go |  62 ++++++++++
+ provider/interfaces.go                  |   6 +
+ provider/types.go                       |  20 ++++
+ ui/model/commands.go                    |  69 +++++++++++-
+ ui/model/inline_overlays.go             |  22 +++-
+ ui/model/keys_spotify_search.go         |  55 +++++----
+ ui/model/keys_spotify_search_test.go    | 134 +++++++++++++++++++---
+ ui/model/playback.go                    |  21 +++-
+ ui/model/state.go                       |   2 +-
+ ui/model/update.go                      |  26 ++++-
+ 13 files changed, 537 insertions(+), 60 deletions(-)
+
+diff --git a/docs/keybindings.md b/docs/keybindings.md
+index 2c01246..5ff2a07 100644
+--- a/docs/keybindings.md
++++ b/docs/keybindings.md
+@@ -181,16 +181,16 @@ Playlist rows show `Name · N tracks · 1h 23m` when the provider returns track
+ 
+ ## Search results overlays
+ 
+-When `Ctrl+F` opens provider search or YouTube/SoundCloud net search and you're viewing the results list:
++When `Ctrl+F` opens provider search or YouTube/SoundCloud net search and you're viewing the results list, Spotify results identify albums, tracks, and episodes explicitly. A standalone `album` word acts as a natural-language hint, so a query such as `Aja album Steely Dan` ranks album matches first.
+ 
+ | Key | Action |
+ |---|---|
+ | `↑` `↓` / `j` `k` / `Ctrl+N` `Ctrl+P` | Move cursor (single item) |
+ | `Ctrl+U` `Ctrl+D` | Scroll results by page |
+ | `Space` | Select or deselect a track for a batch action, then move to the next result |
+-| `Enter` | Play the selected track now |
+-| `a` | Append all marked tracks to the playlist in result order (or the current track if none are marked) |
+-| `q` | Queue all marked tracks to play next in result order (or the current track if none are marked) |
++| `Enter` | Play the selected track now, or load an album and play it from track 1 |
++| `a` | Append all marked results in order; marked albums expand to all their tracks |
++| `q` | Queue all marked results to play next in order; marked albums expand to all their tracks |
+ | `p` | (Spotify only) Save the selected track to a Spotify playlist |
+ | `Esc` `Backspace` | Back to the search input |
+ 
+diff --git a/external/spotify/provider.go b/external/spotify/provider.go
+index 4786cf2..0bd6fef 100644
+--- a/external/spotify/provider.go
++++ b/external/spotify/provider.go
+@@ -29,11 +29,13 @@ import (
+ 
+ // Compile-time interface checks.
+ var (
+-	_ provider.Searcher        = (*SpotifyProvider)(nil)
+-	_ provider.PlaylistWriter  = (*SpotifyProvider)(nil)
+-	_ provider.PlaylistCreator = (*SpotifyProvider)(nil)
+-	_ provider.CustomStreamer  = (*SpotifyProvider)(nil)
+-	_ provider.Closer          = (*SpotifyProvider)(nil)
++	_ provider.Searcher         = (*SpotifyProvider)(nil)
++	_ provider.ResultSearcher   = (*SpotifyProvider)(nil)
++	_ provider.AlbumTrackLoader = (*SpotifyProvider)(nil)
++	_ provider.PlaylistWriter   = (*SpotifyProvider)(nil)
++	_ provider.PlaylistCreator  = (*SpotifyProvider)(nil)
++	_ provider.CustomStreamer   = (*SpotifyProvider)(nil)
++	_ provider.Closer           = (*SpotifyProvider)(nil)
+ )
+ 
+ // maxResponseBody limits JSON API responses to 10 MB.
+@@ -587,6 +589,9 @@ func friendlySearchError(err error) error {
+ 
+ // spotifySearchPage is one page of /v1/search results.
+ type spotifySearchPage struct {
++	Albums struct {
++		Items []*spotifyAlbum `json:"items"`
++	} `json:"albums"`
+ 	Tracks struct {
+ 		Items []*spotifyItem `json:"items"`
+ 	} `json:"tracks"`
+@@ -599,10 +604,10 @@ type spotifySearchPage struct {
+ //
+ // No market parameter: when the request carries a user OAuth token, Spotify
+ // implicitly scopes results to the account's country.
+-func (p *SpotifyProvider) searchPage(ctx context.Context, query string, limit, offset int) (*spotifySearchPage, error) {
++func (p *SpotifyProvider) searchPage(ctx context.Context, query, resultTypes string, limit, offset int) (*spotifySearchPage, error) {
+ 	q := url.Values{
+ 		"q":     {query},
+-		"type":  {"track,episode"},
++		"type":  {resultTypes},
+ 		"limit": {strconv.Itoa(limit)},
+ 	}
+ 	if offset > 0 {
+@@ -624,21 +629,22 @@ func (p *SpotifyProvider) searchPage(ctx context.Context, query string, limit, o
+ // searchPaged collects up to limit results in pages of devModeSearchLimit, for
+ // apps that cannot ask for more in one go. A page that fails after the first
+ // one keeps whatever was already collected rather than losing the whole search.
+-func (p *SpotifyProvider) searchPaged(ctx context.Context, query string, limit int) (*spotifySearchPage, error) {
++func (p *SpotifyProvider) searchPaged(ctx context.Context, query, resultTypes string, limit int) (*spotifySearchPage, error) {
+ 	combined := &spotifySearchPage{}
+ 	for offset := 0; offset < limit; offset += devModeSearchLimit {
+ 		size := min(devModeSearchLimit, limit-offset)
+-		page, err := p.searchPage(ctx, query, size, offset)
++		page, err := p.searchPage(ctx, query, resultTypes, size, offset)
+ 		if err != nil {
+ 			if offset == 0 {
+ 				return nil, err
+ 			}
+ 			break
+ 		}
++		combined.Albums.Items = append(combined.Albums.Items, page.Albums.Items...)
+ 		combined.Tracks.Items = append(combined.Tracks.Items, page.Tracks.Items...)
+ 		combined.Episodes.Items = append(combined.Episodes.Items, page.Episodes.Items...)
+-		// Both result kinds exhausted, so further pages are empty.
+-		if len(page.Tracks.Items) < size && len(page.Episodes.Items) < size {
++		// All requested result kinds exhausted, so further pages are empty.
++		if len(page.Albums.Items) < size && len(page.Tracks.Items) < size && len(page.Episodes.Items) < size {
+ 			break
+ 		}
+ 	}
+@@ -666,9 +672,9 @@ func (p *SpotifyProvider) SearchTracks(ctx context.Context, query string, limit
+ 
+ 	// Try the whole thing in one request first: an app with Extended Quota Mode
+ 	// takes any limit up to 50 and needs no paging.
+-	result, err := p.searchPage(ctx, query, limit, 0)
++	result, err := p.searchPage(ctx, query, "track,episode", limit, 0)
+ 	if err != nil && isInvalidLimit(err) && limit > devModeSearchLimit {
+-		result, err = p.searchPaged(ctx, query, limit)
++		result, err = p.searchPaged(ctx, query, "track,episode", limit)
+ 	}
+ 	if err != nil {
+ 		return nil, friendlySearchError(err)
+@@ -686,6 +692,117 @@ func (p *SpotifyProvider) SearchTracks(ctx context.Context, query string, limit
+ 	return tracks, nil
+ }
+ 
++// SearchResults returns typed Spotify albums, tracks, and episodes. A standalone
++// word "album" is treated as a natural-language type hint: it is removed from
++// the API query and album hits are placed before track hits. Spotify's explicit
++// field syntax (for example album:Aja) is passed through unchanged.
++func (p *SpotifyProvider) SearchResults(ctx context.Context, query string, limit int) ([]provider.SearchResult, error) {
++	if err := p.ensureSession(); err != nil {
++		return nil, err
++	}
++
++	if limit < 1 {
++		limit = 1
++	} else if limit > 50 {
++		limit = 50
++	}
++
++	apiQuery, preferAlbums := spotifySearchQuery(query)
++	result, err := p.searchPage(ctx, apiQuery, "album,track,episode", limit, 0)
++	if err != nil && isInvalidLimit(err) && limit > devModeSearchLimit {
++		result, err = p.searchPaged(ctx, apiQuery, "album,track,episode", limit)
++	}
++	if err != nil {
++		return nil, friendlySearchError(err)
++	}
++
++	albums := make([]provider.SearchResult, 0, len(result.Albums.Items))
++	for _, album := range result.Albums.Items {
++		if album == nil || album.ID == "" {
++			continue
++		}
++		albums = append(albums, provider.SearchResult{Kind: provider.SearchResultAlbum, Album: albumFromItem(album)})
++	}
++
++	tracks := make([]provider.SearchResult, 0, len(result.Tracks.Items)+len(result.Episodes.Items))
++	for _, items := range [][]*spotifyItem{result.Tracks.Items, result.Episodes.Items} {
++		for _, item := range items {
++			if item == nil || item.ID == "" {
++				continue
++			}
++			kind := provider.SearchResultTrack
++			if item.Type == "episode" {
++				kind = provider.SearchResultEpisode
++			}
++			tracks = append(tracks, provider.SearchResult{Kind: kind, Track: trackFromItem(item)})
++		}
++	}
++
++	if preferAlbums {
++		return append(albums, tracks...), nil
++	}
++	return append(tracks, albums...), nil
++}
++
++func spotifySearchQuery(query string) (string, bool) {
++	fields := strings.Fields(query)
++	filtered := make([]string, 0, len(fields))
++	preferAlbums := false
++	for _, field := range fields {
++		if strings.EqualFold(field, "album") {
++			preferAlbums = true
++			continue
++		}
++		filtered = append(filtered, field)
++	}
++	if len(filtered) == 0 {
++		return query, preferAlbums
++	}
++	return strings.Join(filtered, " "), preferAlbums
++}
++
++// AlbumTracks resolves a Spotify album to its complete track list in disc and
++// track order. Search-result metadata fills album/year fields in the UI.
++func (p *SpotifyProvider) AlbumTracks(albumID string) ([]playlist.Track, error) {
++	if err := p.ensureSession(); err != nil {
++		return nil, err
++	}
++
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
++	defer cancel()
++
++	var tracks []playlist.Track
++	offset := 0
++	for {
++		q := url.Values{
++			"limit":  {strconv.Itoa(spotifyTrackPageSize)},
++			"offset": {strconv.Itoa(offset)},
++		}
++		resp, err := p.webAPI(ctx, "GET", fmt.Sprintf("/v1/albums/%s/tracks", albumID), q)
++		if err != nil {
++			return nil, fmt.Errorf("spotify: album tracks: %w", err)
++		}
++		var page struct {
++			Items []*spotifyItem `json:"items"`
++			Total int            `json:"total"`
++		}
++		if err := decodeBody(resp, &page); err != nil {
++			return nil, fmt.Errorf("spotify: parse album tracks: %w", err)
++		}
++		for _, item := range page.Items {
++			if item == nil || item.ID == "" {
++				continue
++			}
++			tracks = append(tracks, trackFromItem(item))
++		}
++		if offset+spotifyTrackPageSize >= page.Total {
++			break
++		}
++		offset += spotifyTrackPageSize
++	}
++	return tracks, nil
++}
++
+ // AddTrackToPlaylist adds a track to an existing Spotify playlist.
+ // The track's Path is used as the Spotify URI (e.g. "spotify:track:..." or
+ // "spotify:episode:..."); the Spotify API accepts either.
+diff --git a/external/spotify/provider_shared.go b/external/spotify/provider_shared.go
+index 9551c35..4470ac4 100644
+--- a/external/spotify/provider_shared.go
++++ b/external/spotify/provider_shared.go
+@@ -6,6 +6,7 @@ import (
+ 	"strings"
+ 
+ 	"github.com/bjarneo/cliamp/playlist"
++	"github.com/bjarneo/cliamp/provider"
+ )
+ 
+ // maxResponseBody limits JSON API responses to 10 MB.
+@@ -36,6 +37,16 @@ type spotifyArtist struct {
+ 	Name string `json:"name"`
+ }
+ 
++// spotifyAlbum is the simplified album object returned by /v1/search.
++type spotifyAlbum struct {
++	ID          string          `json:"id"`
++	Name        string          `json:"name"`
++	URI         string          `json:"uri"`
++	Artists     []spotifyArtist `json:"artists"`
++	ReleaseDate string          `json:"release_date"`
++	TotalTracks int             `json:"total_tracks"`
++}
++
+ // spotifyItem is a track or podcast episode object from the Spotify Web API.
+ // Playlists can hold both; episodes carry a show instead of artists/album.
+ type spotifyItem struct {
+@@ -107,3 +118,21 @@ func trackFromItem(t *spotifyItem) playlist.Track {
+ 		Unplayable:   (t.IsPlayable != nil && !*t.IsPlayable) || t.Restrictions.Reason != "",
+ 	}
+ }
++
++func albumFromItem(a *spotifyAlbum) provider.AlbumInfo {
++	artists := make([]string, len(a.Artists))
++	for i, artist := range a.Artists {
++		artists[i] = artist.Name
++	}
++	var year int
++	if len(a.ReleaseDate) >= 4 {
++		year, _ = strconv.Atoi(a.ReleaseDate[:4])
++	}
++	return provider.AlbumInfo{
++		ID:         a.ID,
++		Name:       a.Name,
++		Artist:     strings.Join(artists, ", "),
++		Year:       year,
++		TrackCount: a.TotalTracks,
++	}
++}
+diff --git a/external/spotify/search_devmode_test.go b/external/spotify/search_devmode_test.go
+index d8b16f4..092b5c4 100644
+--- a/external/spotify/search_devmode_test.go
++++ b/external/spotify/search_devmode_test.go
+@@ -12,6 +12,7 @@ import (
+ 	"strings"
+ 	"testing"
+ 
++	"github.com/bjarneo/cliamp/provider"
+ 	"golang.org/x/oauth2"
+ )
+ 
+@@ -116,3 +117,64 @@ func TestSearchTracksStopsWhenResultsRunOut(t *testing.T) {
+ 		t.Errorf("made %d requests, want 3: %v", len(*limits), *limits)
+ 	}
+ }
++
++func TestSearchResultsPrefersAlbumForNaturalAlbumQuery(t *testing.T) {
++	originalTransport := http.DefaultTransport
++	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
++		if req.URL.Path != "/v1/search" {
++			return nil, fmt.Errorf("unexpected path %q", req.URL.Path)
++		}
++		if got := req.URL.Query().Get("q"); got != "Aja Steely Dan" {
++			t.Errorf("query = %q, want natural album hint removed", got)
++		}
++		if got := req.URL.Query().Get("type"); got != "album,track,episode" {
++			t.Errorf("types = %q, want album,track,episode", got)
++		}
++		body := `{
++			"albums":{"items":[{"id":"album-aja","name":"Aja","uri":"spotify:album:album-aja","release_date":"1977-09-23","total_tracks":7,"artists":[{"name":"Steely Dan"}]}]},
++			"tracks":{"items":[{"id":"track-aja","name":"Aja","type":"track","uri":"spotify:track:track-aja","artists":[{"name":"Steely Dan"}]}]},
++			"episodes":{"items":[]}
++		}`
++		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
++	})
++	t.Cleanup(func() { http.DefaultTransport = originalTransport })
++
++	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
++	p := New(sess, "client", 320)
++	results, err := p.SearchResults(context.Background(), "Aja album Steely Dan", 10)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(results) != 2 || results[0].Kind != provider.SearchResultAlbum {
++		t.Fatalf("results = %+v, want album before track", results)
++	}
++	album := results[0].Album
++	if album.ID != "album-aja" || album.Name != "Aja" || album.Artist != "Steely Dan" || album.Year != 1977 || album.TrackCount != 7 {
++		t.Fatalf("album result = %+v", album)
++	}
++}
++
++func TestAlbumTracksReturnsCompleteOrderedAlbum(t *testing.T) {
++	originalTransport := http.DefaultTransport
++	http.DefaultTransport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
++		if req.URL.Path != "/v1/albums/album-aja/tracks" {
++			return nil, fmt.Errorf("unexpected path %q", req.URL.Path)
++		}
++		body := `{"items":[
++			{"id":"black-cow","name":"Black Cow","type":"track","uri":"spotify:track:black-cow","track_number":1,"artists":[{"name":"Steely Dan"}]},
++			{"id":"aja","name":"Aja","type":"track","uri":"spotify:track:aja","track_number":2,"artists":[{"name":"Steely Dan"}]}
++		],"total":2}`
++		return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: req}, nil
++	})
++	t.Cleanup(func() { http.DefaultTransport = originalTransport })
++
++	sess := &Session{tokenSource: oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token"})}
++	p := New(sess, "client", 320)
++	tracks, err := p.AlbumTracks("album-aja")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(tracks) != 2 || tracks[0].Title != "Black Cow" || tracks[1].Title != "Aja" {
++		t.Fatalf("tracks = %+v, want album order", tracks)
++	}
++}
+diff --git a/provider/interfaces.go b/provider/interfaces.go
+index 912546c..cf85b2f 100644
+--- a/provider/interfaces.go
++++ b/provider/interfaces.go
+@@ -14,6 +14,12 @@ type Searcher interface {
+ 	SearchTracks(ctx context.Context, query string, limit int) ([]playlist.Track, error)
+ }
+ 
++// ResultSearcher optionally enriches provider search with typed results such
++// as albums. Callers fall back to Searcher when it is not implemented.
++type ResultSearcher interface {
++	SearchResults(ctx context.Context, query string, limit int) ([]SearchResult, error)
++}
++
+ // ArtistBrowser is implemented by providers that support listing artists
+ // and their albums.
+ type ArtistBrowser interface {
+diff --git a/provider/types.go b/provider/types.go
+index f29b8a7..afa8938 100644
+--- a/provider/types.go
++++ b/provider/types.go
+@@ -5,6 +5,8 @@
+ // via type assertions.
+ package provider
+ 
++import "github.com/bjarneo/cliamp/playlist"
++
+ // ArtistInfo describes an artist in a provider's catalog.
+ type ArtistInfo struct {
+ 	ID         string
+@@ -23,6 +25,24 @@ type AlbumInfo struct {
+ 	Genre      string
+ }
+ 
++// SearchResultKind distinguishes immediately playable results from containers
++// such as albums whose tracks are resolved only when the user acts on them.
++type SearchResultKind string
++
++const (
++	SearchResultTrack   SearchResultKind = "track"
++	SearchResultEpisode SearchResultKind = "episode"
++	SearchResultAlbum   SearchResultKind = "album"
++)
++
++// SearchResult is a typed provider search hit. Track is populated for track
++// and episode results; Album is populated for album results.
++type SearchResult struct {
++	Kind  SearchResultKind
++	Track playlist.Track
++	Album AlbumInfo
++}
++
+ // SortType describes one sort option for album listing.
+ type SortType struct {
+ 	ID    string // e.g. "alphabeticalByName"
+diff --git a/ui/model/commands.go b/ui/model/commands.go
+index 5123ed7..5f1457c 100644
+--- a/ui/model/commands.go
++++ b/ui/model/commands.go
+@@ -2,6 +2,7 @@ package model
+ 
+ import (
+ 	"context"
++	"fmt"
+ 	"time"
+ 
+ 	tea "charm.land/bubbletea/v2"
+@@ -425,13 +426,29 @@ func fetchCatalogBatchCmd(loader provider.CatalogLoader, offset, limit int, prov
+ // — Spotify search + add-to-playlist messages —
+ 
+ type spotSearchResultsMsg struct {
+-	tracks       []playlist.Track
++	results      []provider.SearchResult
+ 	err          error
+ 	providerName string
+ 	query        string
+ 	gen          uint64
+ }
+ 
++type spotSearchAction int
++
++const (
++	spotSearchPlay spotSearchAction = iota
++	spotSearchAppend
++	spotSearchQueue
++)
++
++type spotSearchResolvedMsg struct {
++	tracks       []playlist.Track
++	action       spotSearchAction
++	providerName string
++	gen          uint64
++	err          error
++}
++
+ type spotPlaylistsMsg struct {
+ 	playlists    []playlist.PlaylistInfo
+ 	err          error
+@@ -455,8 +472,56 @@ type spotCreatedMsg struct {
+ 
+ func fetchSpotSearchCmd(ctx context.Context, s provider.Searcher, providerName, query string, gen uint64) tea.Cmd {
+ 	return func() tea.Msg {
++		if typed, ok := s.(provider.ResultSearcher); ok {
++			results, err := typed.SearchResults(ctx, query, 20)
++			return spotSearchResultsMsg{results: results, err: err, providerName: providerName, query: query, gen: gen}
++		}
+ 		tracks, err := s.SearchTracks(ctx, query, 20)
+-		return spotSearchResultsMsg{tracks: tracks, err: err, providerName: providerName, query: query, gen: gen}
++		results := make([]provider.SearchResult, len(tracks))
++		for i, track := range tracks {
++			results[i] = provider.SearchResult{Kind: provider.SearchResultTrack, Track: track}
++		}
++		return spotSearchResultsMsg{results: results, err: err, providerName: providerName, query: query, gen: gen}
++	}
++}
++
++func resolveSpotSearchResultsCmd(prov playlist.Provider, results []provider.SearchResult, action spotSearchAction, gen uint64) tea.Cmd {
++	return func() tea.Msg {
++		loader, _ := prov.(provider.AlbumTrackLoader)
++		var tracks []playlist.Track
++		seen := make(map[string]bool)
++		for _, result := range results {
++			if result.Kind != provider.SearchResultAlbum {
++				if result.Track.Path != "" && !seen[result.Track.Path] {
++					seen[result.Track.Path] = true
++					tracks = append(tracks, result.Track)
++				}
++				continue
++			}
++			if loader == nil {
++				return spotSearchResolvedMsg{action: action, providerName: prov.Name(), gen: gen, err: fmt.Errorf("%s cannot load album tracks", prov.Name())}
++			}
++			albumTracks, err := loader.AlbumTracks(result.Album.ID)
++			if err != nil {
++				return spotSearchResolvedMsg{action: action, providerName: prov.Name(), gen: gen, err: err}
++			}
++			for _, track := range albumTracks {
++				if track.Album == "" {
++					track.Album = result.Album.Name
++				}
++				if track.Artist == "" {
++					track.Artist = result.Album.Artist
++				}
++				if track.Year == 0 {
++					track.Year = result.Album.Year
++				}
++				if track.Path != "" && !seen[track.Path] {
++					seen[track.Path] = true
++					tracks = append(tracks, track)
++				}
++			}
++		}
++		return spotSearchResolvedMsg{tracks: tracks, action: action, providerName: prov.Name(), gen: gen}
+ 	}
+ }
+ 
+diff --git a/ui/model/inline_overlays.go b/ui/model/inline_overlays.go
+index 8527249..9d2e258 100644
+--- a/ui/model/inline_overlays.go
++++ b/ui/model/inline_overlays.go
+@@ -7,6 +7,7 @@ import (
+ 
+ 	"github.com/bjarneo/cliamp/lyrics"
+ 	"github.com/bjarneo/cliamp/playlist"
++	"github.com/bjarneo/cliamp/provider"
+ 	"github.com/bjarneo/cliamp/theme"
+ 	"github.com/bjarneo/cliamp/ui"
+ )
+@@ -496,16 +497,31 @@ func (m Model) renderSpotSearchBody() string {
+ 	var body string
+ 	switch m.spotSearch.screen {
+ 	case spotSearchResults:
+-		if len(m.spotSearch.results) == 0 {
++		if m.spotSearch.loading {
++			body = bodyLines([]string{loadingLine("Loading album tracks…")}, budget)
++		} else if len(m.spotSearch.results) == 0 {
+ 			body = bodyMessage("No results", budget)
+ 		} else {
+ 			items := make([]string, len(m.spotSearch.results))
+-			for i, t := range m.spotSearch.results {
++			for i, result := range m.spotSearch.results {
+ 				marker := "[ ]"
+ 				if m.spotSearch.selected[i] {
+ 					marker = "[x]"
+ 				}
+-				items[i] = truncate(fmt.Sprintf("%s %s - %s", marker, t.Artist, t.Title), ui.PanelWidth-8)
++				var label string
++				switch result.Kind {
++				case provider.SearchResultAlbum:
++					year := ""
++					if result.Album.Year > 0 {
++						year = fmt.Sprintf(" (%d)", result.Album.Year)
++					}
++					label = fmt.Sprintf("[Album] %s - %s%s", result.Album.Artist, result.Album.Name, year)
++				case provider.SearchResultEpisode:
++					label = fmt.Sprintf("[Episode] %s - %s", result.Track.Artist, result.Track.Title)
++				default:
++					label = fmt.Sprintf("[Track] %s - %s", result.Track.Artist, result.Track.Title)
++				}
++				items[i] = truncate(marker+" "+label, ui.PanelWidth-8)
+ 			}
+ 			body = windowList(items, m.spotSearch.cursor, m.spotSearch.scroll, budget)
+ 		}
+diff --git a/ui/model/keys_spotify_search.go b/ui/model/keys_spotify_search.go
+index 092aefe..c418e4f 100644
+--- a/ui/model/keys_spotify_search.go
++++ b/ui/model/keys_spotify_search.go
+@@ -6,7 +6,6 @@ import (
+ 
+ 	tea "charm.land/bubbletea/v2"
+ 
+-	"github.com/bjarneo/cliamp/playlist"
+ 	"github.com/bjarneo/cliamp/provider"
+ )
+ 
+@@ -62,23 +61,42 @@ func (m *Model) spotSearchResultsMaybeAdjustScroll(visible int) {
+ 	clampScroll(&m.spotSearch.cursor, &m.spotSearch.scroll, len(m.spotSearch.results), visible)
+ }
+ 
+-// spotSearchActionTracks returns marked results in display order. With no
+-// marks, actions retain their original single-track behavior at the cursor.
+-func (m *Model) spotSearchActionTracks() []playlist.Track {
++// spotSearchActionResults returns marked results in display order. With no
++// marks, actions retain their original single-result behavior at the cursor.
++func (m *Model) spotSearchActionResults() []provider.SearchResult {
+ 	if len(m.spotSearch.selected) == 0 {
+ 		if m.spotSearch.cursor < 0 || m.spotSearch.cursor >= len(m.spotSearch.results) {
+ 			return nil
+ 		}
+-		return []playlist.Track{m.spotSearch.results[m.spotSearch.cursor]}
++		return []provider.SearchResult{m.spotSearch.results[m.spotSearch.cursor]}
+ 	}
+ 
+-	tracks := make([]playlist.Track, 0, len(m.spotSearch.selected))
+-	for i, track := range m.spotSearch.results {
++	results := make([]provider.SearchResult, 0, len(m.spotSearch.selected))
++	for i, result := range m.spotSearch.results {
+ 		if m.spotSearch.selected[i] {
+-			tracks = append(tracks, track)
++			results = append(results, result)
+ 		}
+ 	}
+-	return tracks
++	return results
++}
++
++func (m *Model) resolveSpotSearchAction(action spotSearchAction) tea.Cmd {
++	var results []provider.SearchResult
++	if action == spotSearchPlay {
++		if m.spotSearch.cursor < 0 || m.spotSearch.cursor >= len(m.spotSearch.results) {
++			return nil
++		}
++		// Enter always acts on the cursor; marks are reserved for append/queue.
++		results = []provider.SearchResult{m.spotSearch.results[m.spotSearch.cursor]}
++	} else {
++		results = m.spotSearchActionResults()
++	}
++	if len(results) == 0 {
++		return nil
++	}
++	m.spotSearch.loading = true
++	m.spotSearch.err = ""
++	return resolveSpotSearchResultsCmd(m.spotSearch.prov, results, action, nextRequest(&m.requests.spotMutation))
+ }
+ 
+ // handleSpotSearchResultsKey handles navigation through search results.
+@@ -120,25 +138,24 @@ func (m *Model) handleSpotSearchResultsKey(msg tea.KeyPressMsg) tea.Cmd {
+ 		}
+ 	case "enter":
+ 		if count > 0 && !m.spotSearch.loading {
+-			track := m.spotSearch.results[m.spotSearch.cursor]
+-			m.closeSpotSearch()
+-			return m.playTrackImmediate(track)
++			return m.resolveSpotSearchAction(spotSearchPlay)
+ 		}
+ 	case "a":
+ 		if count > 0 && !m.spotSearch.loading {
+-			tracks := m.spotSearchActionTracks()
+-			m.closeSpotSearch()
+-			return m.appendTracks(tracks)
++			return m.resolveSpotSearchAction(spotSearchAppend)
+ 		}
+ 	case "q":
+ 		if count > 0 && !m.spotSearch.loading {
+-			tracks := m.spotSearchActionTracks()
+-			m.closeSpotSearch()
+-			return m.queueTracksNext(tracks)
++			return m.resolveSpotSearchAction(spotSearchQueue)
+ 		}
+ 	case "p":
+ 		if count > 0 && !m.spotSearch.loading {
+-			m.spotSearch.selTrack = m.spotSearch.results[m.spotSearch.cursor]
++			result := m.spotSearch.results[m.spotSearch.cursor]
++			if result.Kind == provider.SearchResultAlbum {
++				m.spotSearch.err = "Choose a track to add to a Spotify playlist."
++				return nil
++			}
++			m.spotSearch.selTrack = result.Track
+ 			m.spotSearch.loading = true
+ 			m.spotSearch.err = ""
+ 			return fetchSpotPlaylistsCmd(m.spotSearch.prov, nextRequest(&m.requests.spotLists))
+diff --git a/ui/model/keys_spotify_search_test.go b/ui/model/keys_spotify_search_test.go
+index 5deb2c7..b346bf5 100644
+--- a/ui/model/keys_spotify_search_test.go
++++ b/ui/model/keys_spotify_search_test.go
+@@ -7,15 +7,41 @@ import (
+ 	tea "charm.land/bubbletea/v2"
+ 
+ 	"github.com/bjarneo/cliamp/playlist"
++	"github.com/bjarneo/cliamp/provider"
+ 	"github.com/bjarneo/cliamp/ui"
+ )
+ 
+-func spotifySearchTestTracks() []playlist.Track {
+-	return []playlist.Track{
++type spotSearchTestProvider struct {
++	albumTracks map[string][]playlist.Track
++}
++
++func (p *spotSearchTestProvider) Name() string                                { return "Spotify" }
++func (p *spotSearchTestProvider) Playlists() ([]playlist.PlaylistInfo, error) { return nil, nil }
++func (p *spotSearchTestProvider) Tracks(string) ([]playlist.Track, error)     { return nil, nil }
++func (p *spotSearchTestProvider) AlbumTracks(id string) ([]playlist.Track, error) {
++	return p.albumTracks[id], nil
++}
++
++func spotifySearchTestResults() []provider.SearchResult {
++	tracks := []playlist.Track{
+ 		{Title: "First", Artist: "Artist", Path: "spotify:track:first"},
+ 		{Title: "Second", Artist: "Artist", Path: "spotify:track:second"},
+ 		{Title: "Third", Artist: "Artist", Path: "spotify:track:third"},
+ 	}
++	results := make([]provider.SearchResult, len(tracks))
++	for i, track := range tracks {
++		results[i] = provider.SearchResult{Kind: provider.SearchResultTrack, Track: track}
++	}
++	return results
++}
++
++func runSpotSearchCmd(t *testing.T, m *Model, cmd tea.Cmd) {
++	t.Helper()
++	if cmd == nil {
++		t.Fatal("expected search action command")
++	}
++	updated, _ := m.Update(cmd())
++	*m = updated.(Model)
+ }
+ 
+ func TestSpotSearchSpaceTogglesSelectionAndAdvances(t *testing.T) {
+@@ -23,7 +49,7 @@ func TestSpotSearchSpaceTogglesSelectionAndAdvances(t *testing.T) {
+ 		plVisible: 10,
+ 		spotSearch: spotSearchState{
+ 			screen:  spotSearchResults,
+-			results: spotifySearchTestTracks(),
++			results: spotifySearchTestResults(),
+ 			cursor:  1,
+ 		},
+ 	}
+@@ -50,16 +76,15 @@ func TestSpotSearchBatchAppendUsesResultOrder(t *testing.T) {
+ 		player:   &fakeEngine{},
+ 		playlist: p,
+ 		spotSearch: spotSearchState{
++			prov:     &spotSearchTestProvider{},
+ 			visible:  true,
+ 			screen:   spotSearchResults,
+-			results:  spotifySearchTestTracks(),
++			results:  spotifySearchTestResults(),
+ 			selected: map[int]bool{0: true, 2: true},
+ 		},
+ 	}
+ 
+-	if cmd := m.handleSpotSearchResultsKey(tea.KeyPressMsg{Text: "a"}); cmd != nil {
+-		t.Fatal("append command was non-nil while playback was active")
+-	}
++	runSpotSearchCmd(t, &m, m.handleSpotSearchResultsKey(tea.KeyPressMsg{Text: "a"}))
+ 	got := m.playlist.Tracks()
+ 	if len(got) != 3 || got[0].Title != "Existing" || got[1].Title != "First" || got[2].Title != "Third" {
+ 		t.Fatalf("playlist titles = %v, want [Existing First Third]", trackTitles(got))
+@@ -76,33 +101,116 @@ func TestSpotSearchBatchQueueUsesResultOrder(t *testing.T) {
+ 		player:   &fakeEngine{},
+ 		playlist: p,
+ 		spotSearch: spotSearchState{
++			prov:     &spotSearchTestProvider{},
+ 			visible:  true,
+ 			screen:   spotSearchResults,
+-			results:  spotifySearchTestTracks(),
++			results:  spotifySearchTestResults(),
+ 			selected: map[int]bool{0: true, 2: true},
+ 		},
+ 	}
+ 
+-	if cmd := m.handleSpotSearchResultsKey(tea.KeyPressMsg{Text: "q"}); cmd != nil {
+-		t.Fatal("queue command was non-nil while playback was active")
+-	}
++	runSpotSearchCmd(t, &m, m.handleSpotSearchResultsKey(tea.KeyPressMsg{Text: "q"}))
+ 	got := m.playlist.QueueTracks()
+ 	if len(got) != 2 || got[0].Title != "First" || got[1].Title != "Third" {
+ 		t.Fatalf("queued titles = %v, want [First Third]", trackTitles(got))
+ 	}
+ }
+ 
++func TestSpotSearchAlbumEnterLoadsAndPlaysWholeAlbumInOrder(t *testing.T) {
++	prov := &spotSearchTestProvider{albumTracks: map[string][]playlist.Track{
++		"aja": {
++			{Title: "Black Cow", Path: "spotify:track:black-cow", TrackNumber: 1},
++			{Title: "Aja", Path: "spotify:track:aja", TrackNumber: 2},
++		},
++	}}
++	m := Model{
++		player:   &fakeEngine{},
++		playlist: playlist.New(),
++		spotSearch: spotSearchState{
++			prov:    prov,
++			visible: true,
++			screen:  spotSearchResults,
++			results: []provider.SearchResult{{
++				Kind:  provider.SearchResultAlbum,
++				Album: provider.AlbumInfo{ID: "aja", Name: "Aja", Artist: "Steely Dan", Year: 1977},
++			}},
++		},
++	}
++
++	runSpotSearchCmd(t, &m, m.handleSpotSearchResultsKey(tea.KeyPressMsg{Code: tea.KeyEnter}))
++	got := m.playlist.Tracks()
++	if titles := trackTitles(got); strings.Join(titles, ",") != "Black Cow,Aja" {
++		t.Fatalf("album track order = %v, want [Black Cow Aja]", titles)
++	}
++	for _, track := range got {
++		if track.Album != "Aja" || track.Artist != "Steely Dan" || track.Year != 1977 {
++			t.Fatalf("album metadata not filled: %+v", track)
++		}
++	}
++	if m.playlist.Index() != 0 {
++		t.Fatalf("playlist index = %d, want first album track", m.playlist.Index())
++	}
++}
++
++func TestSpotSearchEnterUsesCursorInsteadOfMarkedResults(t *testing.T) {
++	m := Model{
++		player:   &fakeEngine{},
++		playlist: playlist.New(),
++		spotSearch: spotSearchState{
++			prov:     &spotSearchTestProvider{},
++			visible:  true,
++			screen:   spotSearchResults,
++			results:  spotifySearchTestResults(),
++			cursor:   1,
++			selected: map[int]bool{0: true, 2: true},
++		},
++	}
++
++	runSpotSearchCmd(t, &m, m.handleSpotSearchResultsKey(tea.KeyPressMsg{Code: tea.KeyEnter}))
++	if titles := trackTitles(m.playlist.Tracks()); strings.Join(titles, ",") != "Second" {
++		t.Fatalf("played tracks = %v, want cursor track only", titles)
++	}
++}
++
++func TestSpotSearchBatchQueueExpandsAlbumBeforeFollowingTrack(t *testing.T) {
++	prov := &spotSearchTestProvider{albumTracks: map[string][]playlist.Track{
++		"aja": {
++			{Title: "Black Cow", Path: "spotify:track:black-cow"},
++			{Title: "Aja", Path: "spotify:track:aja"},
++		},
++	}}
++	m := Model{
++		player:   &fakeEngine{},
++		playlist: playlist.New(),
++		spotSearch: spotSearchState{
++			prov:    prov,
++			visible: true,
++			screen:  spotSearchResults,
++			results: []provider.SearchResult{
++				{Kind: provider.SearchResultAlbum, Album: provider.AlbumInfo{ID: "aja", Name: "Aja", Artist: "Steely Dan"}},
++				{Kind: provider.SearchResultTrack, Track: playlist.Track{Title: "Peg", Path: "spotify:track:peg"}},
++			},
++			selected: map[int]bool{0: true, 1: true},
++		},
++	}
++
++	runSpotSearchCmd(t, &m, m.handleSpotSearchResultsKey(tea.KeyPressMsg{Text: "q"}))
++	if titles := trackTitles(m.playlist.QueueTracks()); strings.Join(titles, ",") != "Black Cow,Aja,Peg" {
++		t.Fatalf("queued tracks = %v, want expanded album then track", titles)
++	}
++}
++
+ func TestSpotSearchResultsRenderSelectionAndHelp(t *testing.T) {
+ 	m := Model{
+ 		plVisible: 4,
+ 		spotSearch: spotSearchState{
+ 			screen:   spotSearchResults,
+-			results:  spotifySearchTestTracks(),
++			results:  spotifySearchTestResults(),
+ 			selected: map[int]bool{1: true},
+ 		},
+ 	}
+ 
+-	if body := m.renderSpotSearchBody(); !strings.Contains(body, "[x] Artist - Second") {
++	if body := m.renderSpotSearchBody(); !strings.Contains(body, "[x] [Track] Artist - Second") {
+ 		t.Fatalf("search body does not mark selected track: %q", body)
+ 	}
+ 	for _, want := range []string{"Space", "Mark", "a", "Append", "q", "Queue"} {
+diff --git a/ui/model/playback.go b/ui/model/playback.go
+index 3026c93..889763f 100644
+--- a/ui/model/playback.go
++++ b/ui/model/playback.go
+@@ -99,16 +99,29 @@ func (m *Model) playCurrentTrack() tea.Cmd {
+ // playTrackImmediate appends a track to the playlist and starts playing it now,
+ // stopping any current playback. Used by search-result "Play now" actions.
+ func (m *Model) playTrackImmediate(track playlist.Track) tea.Cmd {
++	return m.playTracksImmediate([]playlist.Track{track})
++}
++
++// playTracksImmediate appends an ordered group and starts its first track now.
++// Album search uses this to preserve the complete album sequence.
++func (m *Model) playTracksImmediate(tracks []playlist.Track) tea.Cmd {
++	if len(tracks) == 0 {
++		return nil
++	}
+ 	m.player.Stop()
+ 	m.player.ClearPreload()
+-	m.playlist.Add(track)
++	m.playlist.Add(tracks...)
+ 	m.loadedPlaylist = ""
+-	m.addToHeaderState([]playlist.Track{track})
+-	idx := m.playlist.Len() - 1
++	m.addToHeaderState(tracks)
++	idx := m.playlist.Len() - len(tracks)
+ 	m.playlist.SetIndex(idx)
+ 	m.plCursor = idx
+ 	m.adjustScroll()
+-	m.status.Showf(statusTTLMedium, "Playing: %s", track.DisplayName())
++	if len(tracks) == 1 {
++		m.status.Showf(statusTTLMedium, "Playing: %s", tracks[0].DisplayName())
++	} else {
++		m.status.Showf(statusTTLMedium, "Playing album · %d tracks", len(tracks))
++	}
+ 	cmd := m.playCurrentTrack()
+ 	m.notifyPlayback()
+ 	return cmd
+diff --git a/ui/model/state.go b/ui/model/state.go
+index b8dd4af..7b73610 100644
+--- a/ui/model/state.go
++++ b/ui/model/state.go
+@@ -271,7 +271,7 @@ type spotSearchState struct {
+ 	visible   bool
+ 	screen    spotSearchScreenType
+ 	query     string
+-	results   []playlist.Track
++	results   []provider.SearchResult
+ 	selected  map[int]bool // result indexes marked for a batch append/queue action
+ 	cursor    int
+ 	scroll    int
+diff --git a/ui/model/update.go b/ui/model/update.go
+index 4325e8b..461f19b 100644
+--- a/ui/model/update.go
++++ b/ui/model/update.go
+@@ -724,7 +724,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 			m.spotSearch.err = msg.err.Error()
+ 			return m, nil
+ 		}
+-		m.spotSearch.results = msg.tracks
++		m.spotSearch.results = msg.results
+ 		m.spotSearch.selected = nil
+ 		m.spotSearch.cursor = 0
+ 		m.spotSearch.screen = spotSearchResults
+@@ -732,6 +732,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+ 		m.clampActiveScrollState()
+ 		return m, nil
+ 
++	case spotSearchResolvedMsg:
++		if !m.isCurrentSpotMutation(msg.gen, msg.providerName) {
++			return m, nil
++		}
++		m.spotSearch.loading = false
++		if msg.err != nil {
++			m.spotSearch.err = "Album load failed: " + msg.err.Error()
++			return m, nil
++		}
++		if len(msg.tracks) == 0 {
++			m.spotSearch.err = "No playable tracks found."
++			return m, nil
++		}
++		m.closeSpotSearch()
++		switch msg.action {
++		case spotSearchPlay:
++			return m, m.playTracksImmediate(msg.tracks)
++		case spotSearchAppend:
++			return m, m.appendTracks(msg.tracks)
++		case spotSearchQueue:
++			return m, m.queueTracksNext(msg.tracks)
++		}
++		return m, nil
++
+ 	case spotPlaylistsMsg:
+ 		if !m.isCurrentSpotListRequest(msg.gen, msg.providerName) {
+ 			return m, nil
