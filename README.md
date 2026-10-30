@@ -1,3 +1,8 @@
+> **Superseded custom build:** The current build used on both machines is
+> `v2.3.0.custom2`, maintained in [dibdabo/cliamp-custom](https://github.com/dibdabo/cliamp-custom)
+> on branch `spotify-custom-v2.3.0`. That repository is private and requires
+> access. This fork retains the earlier custom1 work for reference.
+
 [![Docs on contextowl.co](https://contextowl.co/uploads/_brand/badge-docs.svg)](https://contextowl.co)
 
 A retro terminal music player inspired by Winamp. Play local files, streams, podcasts, YouTube, YouTube Music, SoundCloud, Mixcloud, Bilibili, Spotify, NetEase Cloud Music, Yandex Music, Xiaoyuzhou (小宇宙), Navidrome, Lyrion, Plex, Jellyfin, and Audiobookshelf. Use the spectrum visualizer, parametric EQ, and playlist manager.
