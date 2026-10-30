@@ -192,12 +192,24 @@ func (m *Model) playTrackImmediate(track playlist.Track) tea.Cmd {
 
 // appendTrack appends a track to the playlist; auto-plays if nothing is playing.
 func (m *Model) appendTrack(track playlist.Track) tea.Cmd {
+	return m.appendTracks([]playlist.Track{track})
+}
+
+// appendTracks appends tracks in order, starting the first if playback is idle.
+func (m *Model) appendTracks(tracks []playlist.Track) tea.Cmd {
+	if len(tracks) == 0 {
+		return nil
+	}
+	idx := m.playlist.Len()
 	wasEmpty := m.playlist.Len() == 0
-	m.playlist.Add(track)
+	m.playlist.Add(tracks...)
 	m.loadedPlaylist = ""
-	m.addToHeaderState([]playlist.Track{track})
-	idx := m.playlist.Len() - 1
-	m.status.Showf(statusTTLMedium, "Added: %s", track.DisplayName())
+	m.addToHeaderState(tracks)
+	if len(tracks) == 1 {
+		m.status.Showf(statusTTLMedium, "Added: %s", tracks[0].DisplayName())
+	} else {
+		m.status.Showf(statusTTLMedium, "Added %d tracks", len(tracks))
+	}
 	if wasEmpty || !m.player.IsPlaying() {
 		m.playlist.SetIndex(idx)
 		m.plCursor = idx
@@ -308,13 +320,27 @@ func (m *Model) cancelSpotRequest() {
 
 // queueTrackNext adds a track to the playlist and queues it to play next.
 func (m *Model) queueTrackNext(track playlist.Track) tea.Cmd {
-	m.playlist.Add(track)
+	return m.queueTracksNext([]playlist.Track{track})
+}
+
+// queueTracksNext preserves selection order after tracks already queued.
+func (m *Model) queueTracksNext(tracks []playlist.Track) tea.Cmd {
+	if len(tracks) == 0 {
+		return nil
+	}
+	idx := m.playlist.Len()
+	m.playlist.Add(tracks...)
 	m.loadedPlaylist = ""
-	m.addToHeaderState([]playlist.Track{track})
-	idx := m.playlist.Len() - 1
-	m.playlist.Queue(idx)
+	m.addToHeaderState(tracks)
+	for i := range tracks {
+		m.playlist.Queue(idx + i)
+	}
 	m.normalizeQueueOverlay()
-	m.status.Showf(statusTTLMedium, "Queued: %s", track.DisplayName())
+	if len(tracks) == 1 {
+		m.status.Showf(statusTTLMedium, "Queued: %s", tracks[0].DisplayName())
+	} else {
+		m.status.Showf(statusTTLMedium, "Queued %d tracks", len(tracks))
+	}
 	if !m.player.IsPlaying() {
 		cmd := m.nextTrack()
 		m.notifyPlayback()

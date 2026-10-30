@@ -102,7 +102,11 @@ func (m Model) renderSpotSearchResults(budget int) string {
 			lines = append(lines, dimStyle.Render(labeledSeparator("", row.Section)))
 			continue
 		}
-		label := truncate(trackViewName(row.Track), ui.PanelWidth-8)
+		mark := "[ ] "
+		if m.spotSearch.selected[row.Index] {
+			mark = "[x] "
+		}
+		label := mark + truncate(trackViewName(row.Track), ui.PanelWidth-12)
 		lines = append(lines, cursorLine(label, row.Index == m.spotSearch.cursor))
 	}
 	return strings.Join(padLines(lines, budget, len(lines)), "\n")
@@ -580,7 +584,11 @@ func (m Model) renderNetSearchBody() string {
 func (m Model) spotSearchHeaderLine() string {
 	switch m.spotSearch.screen {
 	case spotSearchResults:
-		return sepHeaderN("Results", m.spotSearch.cursor+1, len(m.spotSearch.results))
+		title := "Results"
+		if len(m.spotSearch.selected) > 0 {
+			title = fmt.Sprintf("Results (%d marked)", len(m.spotSearch.selected))
+		}
+		return sepHeaderN(title, m.spotSearch.cursor+1, len(m.spotSearch.results))
 	case spotSearchPlaylist:
 		return sepHeaderN("Add to Playlist", m.spotSearch.cursor+1, len(m.spotSearch.playlists)+1)
 	case spotSearchNewName:

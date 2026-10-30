@@ -80,6 +80,16 @@ The provider lists both playlists and saved albums in the Spotify library. Playl
 
 Saved albums appear under a **Saved albums** section, labelled `Artist - Album` and sorted alphabetically by artist. These are the albums in **Your Library**. To add one, open the album in Spotify and click **Save**. Selecting a saved album loads all of its tracks in disc and track order.
 
+## Album search and batch actions
+
+Search includes albums, tracks, and episodes. A standalone `album` word is
+treated as a hint: `Aja album Steely Dan` searches for `Aja Steely Dan`.
+Explicit Spotify fields such as `album:Aja` are passed through.
+
+In search results, press `Space` to mark results, then `a` to append them or
+`q` to queue them in display order. Albums expand into their complete track
+lists. `Enter` plays only the highlighted result.
+
 ## Podcasts
 
 Podcast episodes work as tracks. Press `Ctrl+F` to search Spotify. Matching episodes, such as "Joe Rogan", appear with songs. Press `Enter` to play. Playlists can load and play both songs and episodes.

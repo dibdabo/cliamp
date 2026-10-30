@@ -316,11 +316,14 @@ search and the results list is open:
 | `↑` `↓` / `j` `k` / `Ctrl+N` `Ctrl+P` | Move cursor (single item) |
 | `Ctrl+U` `Ctrl+D` | Scroll results by page |
 | `Enter` | Play the selected track now |
-| `a` | Append the selected track to the playlist |
-| `q` | Queue the selected track to play next |
+| `Space` | In provider search, mark/unmark a result and advance |
+| `a` | Append marked provider results in display order, or the highlighted result when none are marked |
+| `q` | Queue marked provider results in display order, or the highlighted result when none are marked |
 | `f` | Subscribe or unsubscribe from the selected podcast show |
 | `p` | (Spotify only) Save the selected track to a Spotify playlist |
 | `Esc` `Backspace` | Back to the search input |
+
+Marked albums and show collections expand into their tracks before the batch is added. `Enter` still plays only the highlighted result.
 
 Podcasts returns show collections (up to 20), not episodes. `Enter` appends the
 feed's episodes and starts the first; `a` appends them and starts the first if

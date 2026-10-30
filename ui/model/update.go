@@ -889,6 +889,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.spotSearch.results = msg.tracks
+		m.spotSearch.selected = nil
 		m.spotSearch.cursor = 0
 		m.spotSearch.screen = spotSearchResults
 		m.applyHeightMode()
@@ -912,6 +913,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		album := msg.album
 		tracks := msg.tracks
 		m.closeSpotSearch()
+		if msg.batch {
+			if msg.action == spotAlbumQueueNext {
+				return m, m.queueTracksNext(tracks)
+			}
+			return m, m.appendTracks(tracks)
+		}
 		switch msg.action {
 		case spotAlbumAppend:
 			cmd := m.appendAlbum(album, tracks)

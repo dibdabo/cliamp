@@ -11,6 +11,22 @@ import (
 // maxResponseBody limits JSON API responses to 10 MB.
 const maxResponseBody = 10 << 20
 
+// spotifySearchQuery removes the natural-language album hint while preserving
+// Spotify's explicit field syntax, such as album:Aja.
+func spotifySearchQuery(query string) string {
+	fields := strings.Fields(query)
+	filtered := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if !strings.EqualFold(field, "album") {
+			filtered = append(filtered, field)
+		}
+	}
+	if len(filtered) == 0 {
+		return query
+	}
+	return strings.Join(filtered, " ")
+}
+
 // Pagination limits for the Spotify Web API.
 const (
 	spotifyPlaylistPageSize = 50

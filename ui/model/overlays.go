@@ -302,7 +302,14 @@ func (m *Model) netSearchResultsVisible() int {
 }
 
 func (m *Model) spotSearchResultsHelpLine() string {
-	return m.commandHelp(commandModeSpotSearch)
+	return renderCommandHelp([]commandSpec{
+		{KeyLabel: "Space", Label: "Mark"},
+		{KeyLabel: "a", Label: "Append"},
+		{KeyLabel: "q", Label: "Queue"},
+		{KeyLabel: "Esc", Label: "Cancel", Cancel: true},
+		{KeyLabel: "Enter", Label: "Play", Primary: true},
+		{KeyLabel: "Ctrl+K", Label: "Help", Help: true},
+	}, m.helpWidth(), *m)
 }
 
 func (m *Model) spotSearchResultsVisible() int {

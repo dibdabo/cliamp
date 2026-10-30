@@ -135,17 +135,6 @@ func New(send func(tea.Msg)) (*Service, error) {
 		return nil, fmt.Errorf("mpris: session bus: %w", err)
 	}
 
-	reply, err := conn.RequestName("org.mpris.MediaPlayer2.cliamp",
-		dbus.NameFlagDoNotQueue)
-	if err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("mpris: request name: %w", err)
-	}
-	if reply != dbus.RequestNameReplyPrimaryOwner {
-		conn.Close()
-		return nil, fmt.Errorf("mpris: name already taken")
-	}
-
 	svc := &Service{conn: conn, send: send, trackSeq: 1, trackID: trackPath(1)}
 	path := dbus.ObjectPath("/org/mpris/MediaPlayer2")
 
@@ -213,6 +202,21 @@ func New(send func(tea.Msg)) (*Service, error) {
 		return nil, fmt.Errorf("mpris: export props: %w", err)
 	}
 	svc.props = props
+
+	// Claim the well-known name only after the object is fully exported.
+	// MPRIS clients commonly query Properties as soon as NameOwnerChanged is
+	// emitted; owning the name earlier creates a race where that first GetAll
+	// sees an incomplete object and some clients never retry.
+	reply, err := conn.RequestName("org.mpris.MediaPlayer2.cliamp",
+		dbus.NameFlagDoNotQueue)
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("mpris: request name: %w", err)
+	}
+	if reply != dbus.RequestNameReplyPrimaryOwner {
+		conn.Close()
+		return nil, fmt.Errorf("mpris: name already taken")
+	}
 
 	return svc, nil
 }

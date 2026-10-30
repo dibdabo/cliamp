@@ -933,6 +933,7 @@ func (p *SpotifyProvider) SearchTracks(ctx context.Context, query string, limit 
 	if err := p.ensureSession(); err != nil {
 		return nil, err
 	}
+	query = spotifySearchQuery(query)
 
 	if limit < 1 {
 		limit = 1

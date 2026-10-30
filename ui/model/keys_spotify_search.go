@@ -68,6 +68,50 @@ func (m *Model) spotSearchResultsMaybeAdjustScroll(visible int) {
 	}
 }
 
+// spotSearchActionTracks returns marked results in display order, or the cursor's result.
+func (m *Model) spotSearchActionTracks() []playlist.Track {
+	if len(m.spotSearch.selected) == 0 {
+		if m.spotSearch.cursor < 0 || m.spotSearch.cursor >= len(m.spotSearch.results) {
+			return nil
+		}
+		return []playlist.Track{m.spotSearch.results[m.spotSearch.cursor]}
+	}
+	tracks := make([]playlist.Track, 0, len(m.spotSearch.selected))
+	for i, track := range m.spotSearch.results {
+		if m.spotSearch.selected[i] {
+			tracks = append(tracks, track)
+		}
+	}
+	return tracks
+}
+
+// actOnSpotSelection expands collections before committing the whole selection.
+func (m *Model) actOnSpotSelection(action spotAlbumAction) tea.Cmd {
+	tracks := m.spotSearchActionTracks()
+	for _, track := range tracks {
+		if !track.IsAlbum() {
+			continue
+		}
+		if len(tracks) == 1 {
+			return m.expandSpotAlbum(track, action)
+		}
+		loader, ok := m.spotSearch.prov.(provider.AlbumTrackLoader)
+		if !ok {
+			m.setSpotSearchError("This provider cannot open albums.")
+			return nil
+		}
+		m.spotSearch.albumLoading = true
+		m.spotSearch.err = ""
+		ctx := m.newSpotRequestContext(30 * time.Second)
+		return fetchSpotSelectionCmd(ctx, loader, tracks, action, nextRequest(&m.requests.spotAlbum))
+	}
+	m.closeSpotSearch()
+	if action == spotAlbumQueueNext {
+		return m.queueTracksNext(tracks)
+	}
+	return m.appendTracks(tracks)
+}
+
 // handleSpotSearchResultsKey handles navigation through search results.
 func (m *Model) handleSpotSearchResultsKey(msg tea.KeyPressMsg) tea.Cmd {
 	count := len(m.spotSearch.results)
@@ -90,6 +134,21 @@ func (m *Model) handleSpotSearchResultsKey(msg tea.KeyPressMsg) tea.Cmd {
 			m.spotSearch.cursor = 0
 		}
 		m.spotSearchResultsMaybeAdjustScroll(m.spotSearchResultsVisible())
+	case "space":
+		if count > 0 && !m.spotSearchBusy() {
+			if m.spotSearch.selected == nil {
+				m.spotSearch.selected = make(map[int]bool)
+			}
+			if m.spotSearch.selected[m.spotSearch.cursor] {
+				delete(m.spotSearch.selected, m.spotSearch.cursor)
+			} else {
+				m.spotSearch.selected[m.spotSearch.cursor] = true
+			}
+			if m.spotSearch.cursor < count-1 {
+				m.spotSearch.cursor++
+				m.spotSearchResultsMaybeAdjustScroll(m.spotSearchResultsVisible())
+			}
+		}
 	case "enter":
 		if count > 0 && !m.spotSearchBusy() {
 			track := m.spotSearch.results[m.spotSearch.cursor]
@@ -101,21 +160,11 @@ func (m *Model) handleSpotSearchResultsKey(msg tea.KeyPressMsg) tea.Cmd {
 		}
 	case "a":
 		if count > 0 && !m.spotSearchBusy() {
-			track := m.spotSearch.results[m.spotSearch.cursor]
-			if track.IsAlbum() {
-				return m.expandSpotAlbum(track, spotAlbumAppend)
-			}
-			m.closeSpotSearch()
-			return m.appendTrack(track)
+			return m.actOnSpotSelection(spotAlbumAppend)
 		}
 	case "q":
 		if count > 0 && !m.spotSearchBusy() {
-			track := m.spotSearch.results[m.spotSearch.cursor]
-			if track.IsAlbum() {
-				return m.expandSpotAlbum(track, spotAlbumQueueNext)
-			}
-			m.closeSpotSearch()
-			return m.queueTrackNext(track)
+			return m.actOnSpotSelection(spotAlbumQueueNext)
 		}
 	case "p":
 		if count > 0 && !m.spotSearchBusy() {

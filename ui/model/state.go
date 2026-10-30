@@ -305,14 +305,15 @@ const (
 
 // spotSearchState holds state for the provider search + add-to-playlist overlay.
 type spotSearchState struct {
-	prov    playlist.Provider // the provider being searched (may differ from active provider)
-	visible bool
-	screen  spotSearchScreenType
-	query   string
-	results []playlist.Track
-	cursor  int
-	scroll  int
-	loading bool
+	prov     playlist.Provider // the provider being searched (may differ from active provider)
+	visible  bool
+	screen   spotSearchScreenType
+	query    string
+	results  []playlist.Track
+	selected map[int]bool // result indexes marked for batch append/queue
+	cursor   int
+	scroll   int
+	loading  bool
 	// albumLoading is separate from loading so the results screen can say an
 	// album is being expanded without claiming so during the playlist fetch.
 	albumLoading bool

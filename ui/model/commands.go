@@ -543,6 +543,7 @@ const (
 )
 
 type spotAlbumTracksMsg struct {
+	batch  bool
 	tracks []playlist.Track
 	album  playlist.Track
 	action spotAlbumAction
@@ -555,16 +556,44 @@ type spotAlbumTracksMsg struct {
 // runs before the album can reach the player.
 func fetchSpotAlbumTracksCmd(ctx context.Context, loader provider.AlbumTrackLoader, album playlist.Track, action spotAlbumAction, gen uint64) tea.Cmd {
 	return func() tea.Msg {
-		var tracks []playlist.Track
-		var err error
-		if contextual, ok := loader.(interface {
-			AlbumTracksContext(context.Context, string) ([]playlist.Track, error)
-		}); ok {
-			tracks, err = contextual.AlbumTracksContext(ctx, album.AlbumID())
-		} else {
-			tracks, err = loader.AlbumTracks(album.AlbumID())
-		}
+		tracks, err := loadSpotAlbumTracks(ctx, loader, album)
 		return spotAlbumTracksMsg{tracks: tracks, album: album, action: action, err: err, gen: gen}
+	}
+}
+
+func loadSpotAlbumTracks(ctx context.Context, loader provider.AlbumTrackLoader, album playlist.Track) ([]playlist.Track, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if contextual, ok := loader.(interface {
+		AlbumTracksContext(context.Context, string) ([]playlist.Track, error)
+	}); ok {
+		return contextual.AlbumTracksContext(ctx, album.AlbumID())
+	}
+	return loader.AlbumTracks(album.AlbumID())
+}
+
+// fetchSpotSelectionCmd expands albums in display order without partially adding results.
+func fetchSpotSelectionCmd(ctx context.Context, loader provider.AlbumTrackLoader, results []playlist.Track, action spotAlbumAction, gen uint64) tea.Cmd {
+	return func() tea.Msg {
+		msg := spotAlbumTracksMsg{action: action, gen: gen, batch: true}
+		for _, result := range results {
+			if err := ctx.Err(); err != nil {
+				msg.err = err
+				return msg
+			}
+			if !result.IsAlbum() {
+				msg.tracks = append(msg.tracks, result)
+				continue
+			}
+			tracks, err := loadSpotAlbumTracks(ctx, loader, result)
+			if err != nil {
+				msg.err = fmt.Errorf("opening %s: %w", result.Title, err)
+				return msg
+			}
+			msg.tracks = append(msg.tracks, tracks...)
+		}
+		return msg
 	}
 }
 

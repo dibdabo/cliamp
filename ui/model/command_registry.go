@@ -218,6 +218,9 @@ var commandRegistry = []commandSpec{
 		}
 		return true
 	}},
+	{Mode: commandModeSpotSearch, Keys: []string{"space"}, KeyLabel: "Space", Label: "Mark result", Keymap: true},
+	{Mode: commandModeSpotSearch, Keys: []string{"a"}, KeyLabel: "a", Label: "Append marked results", Keymap: true},
+	{Mode: commandModeSpotSearch, Keys: []string{"q"}, KeyLabel: "q", Label: "Queue marked results", Keymap: true},
 	{Mode: commandModeSpotSearch, Keys: []string{"f"}, KeyLabel: "f", Label: "Favorite", ContextHelp: true, Prominent: true, Enabled: func(m Model) bool {
 		_, ok := m.spotSearch.prov.(provider.FavoriteToggler)
 		return ok && m.spotSearch.screen == spotSearchResults && !m.spotSearchBusy() &&
